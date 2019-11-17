@@ -14,6 +14,7 @@ use cranelift_frontend::{FunctionBuilder, Position, Variable};
 use cranelift_wasm::{self, FuncTranslator};
 use cranelift_wasm::{get_vmctx_value_label, translate_operator};
 use cranelift_wasm::{FuncEnvironment, ReturnMode, WasmError};
+use cranelift_wasm::ModuleTranslationState;
 use std::mem;
 use std::sync::{Arc, RwLock};
 use wasmer_runtime_core::error::CompileError;
@@ -23,6 +24,7 @@ use wasmer_runtime_core::{
     codegen::*,
     memory::MemoryType,
     module::{ModuleInfo, ModuleInner},
+    parse::type_to_wp_type,
     structures::{Map, TypedIndex},
     types::{
         FuncIndex, FuncSig, GlobalIndex, LocalFuncIndex, LocalOrImport, MemoryIndex, SigIndex,
@@ -38,6 +40,7 @@ pub struct CraneliftModuleCodeGenerator {
     pub clif_signatures: Map<SigIndex, ir::Signature>,
     function_signatures: Option<Arc<Map<FuncIndex, SigIndex>>>,
     functions: Vec<CraneliftFunctionCodeGenerator>,
+    state: Arc<ModuleTranslationState>,
 }
 
 impl ModuleCodeGenerator<CraneliftFunctionCodeGenerator, Caller, CodegenError>
@@ -45,12 +48,14 @@ impl ModuleCodeGenerator<CraneliftFunctionCodeGenerator, Caller, CodegenError>
 {
     fn new() -> Self {
         let isa = get_isa();
+        let state = Arc::new(ModuleTranslationState::new());
         CraneliftModuleCodeGenerator {
             isa,
             clif_signatures: Map::new(),
             functions: vec![],
             function_signatures: None,
             signatures: None,
+            state,
         }
     }
 
@@ -99,6 +104,7 @@ impl ModuleCodeGenerator<CraneliftFunctionCodeGenerator, Caller, CodegenError>
                 target_config: self.isa.frontend_config().clone(),
                 clif_signatures: self.clif_signatures.clone(),
             },
+            module_state: Arc::clone(&self.state),
         };
 
         debug_assert_eq!(func_env.func.dfg.num_ebbs(), 0, "Function must be empty");
@@ -177,9 +183,22 @@ impl ModuleCodeGenerator<CraneliftFunctionCodeGenerator, Caller, CodegenError>
     fn feed_signatures(&mut self, signatures: Map<SigIndex, FuncSig>) -> Result<(), CodegenError> {
         self.signatures = Some(Arc::new(signatures));
         let call_conv = self.isa.frontend_config().default_call_conv;
+        Arc::get_mut(&mut self.state).unwrap().wasm_types.reserve(self.signatures.as_ref().unwrap().len());
         for (_sig_idx, func_sig) in self.signatures.as_ref().unwrap().iter() {
+            let clif_sig = convert_func_sig(func_sig, call_conv);
+            let params = func_sig.params()
+                .iter()
+                .cloned()
+                .map(type_to_wp_type)
+                .collect::<Vec<_>>().into_boxed_slice();
+            let returns = func_sig.returns()
+                .iter()
+                .cloned()
+                .map(type_to_wp_type)
+                .collect::<Vec<_>>().into_boxed_slice();
+            Arc::get_mut(&mut self.state).unwrap().wasm_types.push((params, returns));
             self.clif_signatures
-                .push(convert_func_sig(func_sig, call_conv));
+                .push(clif_sig);
         }
         Ok(())
     }
@@ -239,6 +258,7 @@ pub struct CraneliftFunctionCodeGenerator {
     next_local: usize,
     position: Position,
     func_env: FunctionEnvironment,
+    module_state: Arc<ModuleTranslationState>,
 }
 
 pub struct FunctionEnvironment {
@@ -1017,7 +1037,8 @@ impl FunctionCodeGenerator<CodegenError> for CraneliftFunctionCodeGenerator {
             &mut self.position,
         );
         let state = &mut self.func_translator.state;
-        translate_operator(op, &mut builder, state, &mut self.func_env)?;
+        let module_state: &ModuleTranslationState = self.module_state.as_ref();
+        translate_operator(module_state, op, &mut builder, state, &mut self.func_env)?;
         Ok(())
     }
 
@@ -1036,7 +1057,7 @@ impl FunctionCodeGenerator<CodegenError> for CraneliftFunctionCodeGenerator {
         //
         // If the exit block is unreachable, it may not have the correct arguments, so we would
         // generate a return instruction that doesn't match the signature.
-        if state.reachable {
+        if state.reachable() {
             debug_assert!(builder.is_pristine());
             if !builder.is_unreachable() {
                 match return_mode {
