@@ -87,6 +87,10 @@ struct PrestandardFeatures {
     #[structopt(long = "enable-threads")]
     threads: bool,
 
+    /// Enable support for the multi-value proposal.
+    #[structopt(long = "enable-multi-value")]
+    multi_value: bool,
+
     /// Enable support for all pre-standard proposals.
     #[structopt(long = "enable-all")]
     all: bool,
@@ -102,6 +106,9 @@ impl PrestandardFeatures {
         if self.threads || self.all {
             features.enable_threads();
         }
+        if self.multi_value || self.all {
+            features.enable_multi_value();
+        }
         features.enable_sign_extension();
         features.enable_sat_float_to_int();
         features
@@ -112,6 +119,7 @@ impl PrestandardFeatures {
         Features {
             simd: self.simd || self.all,
             threads: self.threads || self.all,
+            multi_value: self.multi_value || self.all,
         }
     }
 }
