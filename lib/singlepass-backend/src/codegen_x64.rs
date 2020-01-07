@@ -271,7 +271,9 @@ pub struct ControlFrame {
     pub label: DynamicLabel,
     pub loop_like: bool,
     pub if_else: IfElseState,
+    pub params: SmallVec<[WpType; 1]>,
     pub returns: SmallVec<[WpType; 1]>,
+    pub return_slots: SmallVec<[Location; 1]>,
     pub value_stack_depth: usize,
     pub state: MachineState,
     pub state_diff_id: usize,
@@ -2396,7 +2398,9 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
             label: a.get_label(),
             loop_like: false,
             if_else: IfElseState::None,
+            params: SmallVec::new(),
             returns: self.returns.clone(),
+            return_slots: SmallVec::new(),
             value_stack_depth: 0,
             state: self.machine.state.clone(),
             state_diff_id,
@@ -6298,13 +6302,40 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                     label: label_end,
                     loop_like: false,
                     if_else: IfElseState::If(label_else),
+                    params: match ty {
+                        WpTypeOrFuncType::Type(_) => smallvec![],
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            sig.params().iter().cloned().map(type_to_wp_type).collect()
+                        }
+                    },
                     returns: match ty {
                         WpTypeOrFuncType::Type(WpType::EmptyBlockType) => smallvec![],
                         WpTypeOrFuncType::Type(inner_ty) => smallvec![inner_ty],
-                        _ => {
-                            return Err(CodegenError {
-                                message: format!("If: multi-value returns not yet implemented"),
-                            })
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            sig.returns().iter().cloned().map(type_to_wp_type).collect()
+                        }
+                    },
+                    return_slots: match ty {
+                        WpTypeOrFuncType::Type(WpType::EmptyBlockType) => smallvec![],
+                        WpTypeOrFuncType::Type(_inner_ty) => smallvec![Location::GPR(GPR::RAX)],
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            self.machine.acquire_locations(
+                                a,
+                                sig.returns()
+                                    .iter()
+                                    .cloned()
+                                    .map(type_to_wp_type)
+                                    .zip(iter::repeat(MachineValue::Undefined))
+                                    .collect::<Vec<(WpType, MachineValue)>>()
+                                    .as_slice(),
+                                false,
+                            )
                         }
                     },
                     value_stack_depth: self.value_stack.len(),
@@ -6413,13 +6444,40 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                     label: a.get_label(),
                     loop_like: false,
                     if_else: IfElseState::None,
+                    params: match ty {
+                        WpTypeOrFuncType::Type(_) => smallvec![],
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            sig.params().iter().cloned().map(type_to_wp_type).collect()
+                        }
+                    },
                     returns: match ty {
                         WpTypeOrFuncType::Type(WpType::EmptyBlockType) => smallvec![],
                         WpTypeOrFuncType::Type(inner_ty) => smallvec![inner_ty],
-                        _ => {
-                            return Err(CodegenError {
-                                message: format!("Block: multi-value returns not yet implemented"),
-                            })
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            sig.returns().iter().cloned().map(type_to_wp_type).collect()
+                        }
+                    },
+                    return_slots: match ty {
+                        WpTypeOrFuncType::Type(WpType::EmptyBlockType) => smallvec![],
+                        WpTypeOrFuncType::Type(_inner_ty) => smallvec![Location::GPR(GPR::RAX)],
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            self.machine.acquire_locations(
+                                a,
+                                sig.returns()
+                                    .iter()
+                                    .cloned()
+                                    .map(type_to_wp_type)
+                                    .zip(iter::repeat(MachineValue::Undefined))
+                                    .collect::<Vec<(WpType, MachineValue)>>()
+                                    .as_slice(),
+                                false,
+                            )
                         }
                     },
                     value_stack_depth: self.value_stack.len(),
@@ -6442,13 +6500,40 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                     label: label,
                     loop_like: true,
                     if_else: IfElseState::None,
+                    params: match ty {
+                        WpTypeOrFuncType::Type(_) => smallvec![],
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            sig.params().iter().cloned().map(type_to_wp_type).collect()
+                        }
+                    },
                     returns: match ty {
                         WpTypeOrFuncType::Type(WpType::EmptyBlockType) => smallvec![],
                         WpTypeOrFuncType::Type(inner_ty) => smallvec![inner_ty],
-                        _ => {
-                            return Err(CodegenError {
-                                message: format!("Loop: multi-value returns not yet implemented"),
-                            })
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            sig.returns().iter().cloned().map(type_to_wp_type).collect()
+                        }
+                    },
+                    return_slots: match ty {
+                        WpTypeOrFuncType::Type(WpType::EmptyBlockType) => smallvec![],
+                        WpTypeOrFuncType::Type(_inner_ty) => smallvec![Location::GPR(GPR::RAX)],
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            self.machine.acquire_locations(
+                                a,
+                                sig.returns()
+                                    .iter()
+                                    .cloned()
+                                    .map(type_to_wp_type)
+                                    .zip(iter::repeat(MachineValue::Undefined))
+                                    .collect::<Vec<(WpType, MachineValue)>>()
+                                    .as_slice(),
+                                false,
+                            )
                         }
                     },
                     value_stack_depth: self.value_stack.len(),
