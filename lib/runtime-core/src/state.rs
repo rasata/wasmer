@@ -82,6 +82,8 @@ pub enum MachineValue {
     WasmStack(usize),
     /// Wasm Local.
     WasmLocal(usize),
+    /// Slot for return value of a block, to be filled in later.
+    ReturnSlot,
     /// Two Halves.
     TwoHalves(Box<(MachineValue, MachineValue)>), // 32-bit values. TODO: optimize: add another type for inner "half" value to avoid boxing?
 }
@@ -747,6 +749,7 @@ pub mod x64 {
                             }
                         }
                     }
+                    MachineValue::ReturnSlot => stack_offset -= 1,
                     MachineValue::TwoHalves(ref inner) => {
                         stack_offset -= 1;
                         // TODO: Cleanup
@@ -1196,6 +1199,9 @@ pub mod x64 {
                     }
                     MachineValue::WasmLocal(idx) => {
                         wasm_locals[idx] = Some(*stack);
+                        stack = stack.offset(1);
+                    }
+                    MachineValue::ReturnSlot => {
                         stack = stack.offset(1);
                     }
                     MachineValue::TwoHalves(ref inner) => {
