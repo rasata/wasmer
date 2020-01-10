@@ -271,6 +271,7 @@ pub struct ControlFrame {
     pub label: DynamicLabel,
     pub loop_like: bool,
     pub if_else: IfElseState,
+    pub num_params: usize,
     pub returns: SmallVec<[WpType; 1]>,
     pub value_stack_depth: usize,
     pub state: MachineState,
@@ -2396,6 +2397,7 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
             label: a.get_label(),
             loop_like: false,
             if_else: IfElseState::None,
+            num_params: 0,
             returns: self.returns.clone(),
             value_stack_depth: 0,
             state: self.machine.state.clone(),
@@ -6298,13 +6300,21 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                     label: label_end,
                     loop_like: false,
                     if_else: IfElseState::If(label_else),
+                    num_params: match ty {
+                        WpTypeOrFuncType::Type(_) => 0,
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            sig.params().len()
+                        }
+                    },
                     returns: match ty {
                         WpTypeOrFuncType::Type(WpType::EmptyBlockType) => smallvec![],
                         WpTypeOrFuncType::Type(inner_ty) => smallvec![inner_ty],
-                        _ => {
-                            return Err(CodegenError {
-                                message: format!("If: multi-value returns not yet implemented"),
-                            })
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            sig.returns().iter().cloned().map(type_to_wp_type).collect()
                         }
                     },
                     value_stack_depth: self.value_stack.len(),
@@ -6341,9 +6351,11 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                     );
                 }
 
-                let released: &[Location] = &self.value_stack[frame.value_stack_depth..];
+                let value_stack_depth = self.value_stack.len() - (frame.num_params + frame.returns.len());
+                let released: &[Location] = &self.value_stack[value_stack_depth..];
                 self.machine.release_locations(a, released);
-                self.value_stack.truncate(frame.value_stack_depth);
+                self.value_stack.truncate(value_stack_depth);
+                assert_eq!(frame.value_stack_depth, self.value_stack.len());
 
                 match frame.if_else {
                     IfElseState::If(label) => {
@@ -6413,13 +6425,21 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                     label: a.get_label(),
                     loop_like: false,
                     if_else: IfElseState::None,
+                    num_params: match ty {
+                        WpTypeOrFuncType::Type(_) => 0,
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            sig.params().len()
+                        }
+                    },
                     returns: match ty {
                         WpTypeOrFuncType::Type(WpType::EmptyBlockType) => smallvec![],
                         WpTypeOrFuncType::Type(inner_ty) => smallvec![inner_ty],
-                        _ => {
-                            return Err(CodegenError {
-                                message: format!("Block: multi-value returns not yet implemented"),
-                            })
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            sig.returns().iter().cloned().map(type_to_wp_type).collect()
                         }
                     },
                     value_stack_depth: self.value_stack.len(),
@@ -6442,13 +6462,21 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                     label: label,
                     loop_like: true,
                     if_else: IfElseState::None,
+                    num_params: match ty {
+                        WpTypeOrFuncType::Type(_) => 0,
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            sig.params().len()
+                        }
+                    },
                     returns: match ty {
                         WpTypeOrFuncType::Type(WpType::EmptyBlockType) => smallvec![],
                         WpTypeOrFuncType::Type(inner_ty) => smallvec![inner_ty],
-                        _ => {
-                            return Err(CodegenError {
-                                message: format!("Loop: multi-value returns not yet implemented"),
-                            })
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            sig.returns().iter().cloned().map(type_to_wp_type).collect()
                         }
                     },
                     value_stack_depth: self.value_stack.len(),
@@ -7471,9 +7499,11 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                     a.emit_pop(Size::S64, Location::GPR(GPR::RBP));
                     a.emit_ret();
                 } else {
-                    let released = &self.value_stack[frame.value_stack_depth..];
+                    let value_stack_depth = self.value_stack.len() - (frame.num_params + frame.returns.len());
+                    let released = &self.value_stack[value_stack_depth..];
                     self.machine.release_locations(a, released);
-                    self.value_stack.truncate(frame.value_stack_depth);
+                    self.value_stack.truncate(value_stack_depth);
+                    assert_eq!(frame.value_stack_depth, self.value_stack.len());
 
                     if !frame.loop_like {
                         a.emit_label(frame.label);
