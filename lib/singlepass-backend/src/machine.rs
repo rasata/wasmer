@@ -6,8 +6,10 @@ use wasmer_runtime_core::{
     wasmparser::Type as WpType,
 };
 
+#[derive(Copy, Clone, Debug)]
 struct MachineStackOffset(usize);
 
+#[derive(Clone, Debug)]
 pub struct Machine {
     used_gprs: HashSet<GPR>,
     used_xmms: HashSet<XMM>,

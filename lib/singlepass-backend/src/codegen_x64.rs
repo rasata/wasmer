@@ -273,15 +273,21 @@ pub struct ControlFrame {
     pub if_else: IfElseState,
     pub num_params: usize,
     pub returns: SmallVec<[WpType; 1]>,
+    pub return_slots: SmallVec<[Location; 1]>,
+
+    // The depth at which the block was started. At that point it includes the
+    // params in num_params on the stack, and does not include space for
+    // results.
     pub value_stack_depth: usize,
+
     pub state: MachineState,
     pub state_diff_id: usize,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub enum IfElseState {
     None,
-    If(DynamicLabel),
+    If((DynamicLabel, SmallVec<[Location; 1]>, Machine)),
     Else,
 }
 
@@ -2393,12 +2399,28 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
 
         a.emit_sub(Size::S64, Location::Imm32(32), Location::GPR(GPR::RSP)); // simulate "red zone" if not supported by the platform
 
+        let return_slots = match self.returns.len() {
+            0 => smallvec![],
+            1 => smallvec![Location::GPR(GPR::RAX)],
+            _ => self.machine.acquire_locations(
+                a,
+                self.returns
+                    .iter()
+                    .cloned()
+                    .zip(iter::repeat(MachineValue::ReturnSlot))
+                    .collect::<Vec<(WpType, MachineValue)>>()
+                    .as_slice(),
+                false,
+            ),
+        };
+
         self.control_stack.push(ControlFrame {
             label: a.get_label(),
             loop_like: false,
             if_else: IfElseState::None,
             num_params: 0,
             returns: self.returns.clone(),
+            return_slots,
             value_stack_depth: 0,
             state: self.machine.state.clone(),
             state_diff_id,
@@ -2475,7 +2497,8 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                         // We are in a reachable true branch
                         if self.unreachable_depth == 1 {
                             if let Some(IfElseState::If(_)) =
-                                self.control_stack.last().map(|x| x.if_else)
+                                //self.control_stack.last().map(|x| x.if_else)
+                                self.control_stack.last().map(|x| &x.if_else)
                             {
                                 self.unreachable_depth -= 1;
                             }
@@ -6147,17 +6170,27 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
 
                 self.machine.release_locations_only_stack(a, &params);
 
-                if return_types.len() > 0 {
+                let mut seq: Vec<Location> = vec![];
+                seq.extend(
+                    [
+                        Location::GPR(GPR::RAX),
+                        Location::GPR(GPR::RDX),
+                        Location::GPR(GPR::RCX),
+                    ]
+                    .iter()
+                    .cloned(),
+                );
+                for i in 0..return_types.len() {
                     let ret = self.machine.acquire_locations(
                         a,
                         &[(
-                            return_types[0],
+                            return_types[i],
                             MachineValue::WasmStack(self.value_stack.len()),
                         )],
                         false,
                     )[0];
                     self.value_stack.push(ret);
-                    a.emit_mov(Size::S64, Location::GPR(GPR::RAX), ret);
+                    a.emit_mov(Size::S64, seq[i], ret);
                 }
             }
             Operator::CallIndirect { index, table_index } => {
@@ -6276,17 +6309,27 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
 
                 self.machine.release_locations_only_stack(a, &params);
 
-                if return_types.len() > 0 {
+                let mut seq: Vec<Location> = vec![];
+                seq.extend(
+                    [
+                        Location::GPR(GPR::RAX),
+                        Location::GPR(GPR::RDX),
+                        Location::GPR(GPR::RCX),
+                    ]
+                    .iter()
+                    .cloned(),
+                );
+                for i in 0..return_types.len() {
                     let ret = self.machine.acquire_locations(
                         a,
                         &[(
-                            return_types[0],
+                            return_types[i],
                             MachineValue::WasmStack(self.value_stack.len()),
                         )],
                         false,
                     )[0];
                     self.value_stack.push(ret);
-                    a.emit_mov(Size::S64, Location::GPR(GPR::RAX), ret);
+                    a.emit_mov(Size::S64, seq[i], ret);
                 }
             }
             Operator::If { ty } => {
@@ -6296,18 +6339,30 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                 let cond =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
 
+                let num_params = match ty {
+                    WpTypeOrFuncType::Type(_) => 0,
+                    WpTypeOrFuncType::FuncType(sig_index) => {
+                        let sig_index = SigIndex::new(sig_index as usize);
+                        let sig = self.signatures.get(sig_index).unwrap();
+                        sig.params().len()
+                    }
+                };
+
                 let frame = ControlFrame {
                     label: label_end,
                     loop_like: false,
-                    if_else: IfElseState::If(label_else),
-                    num_params: match ty {
-                        WpTypeOrFuncType::Type(_) => 0,
-                        WpTypeOrFuncType::FuncType(sig_index) => {
-                            let sig_index = SigIndex::new(sig_index as usize);
-                            let sig = self.signatures.get(sig_index).unwrap();
-                            sig.params().len()
-                        }
-                    },
+                    if_else: IfElseState::If((
+                        label_else,
+                        self.value_stack
+                            .iter()
+                            .rev()
+                            .take(num_params)
+                            .rev()
+                            .cloned()
+                            .collect(),
+                        self.machine.clone(),
+                    )),
+                    num_params,
                     returns: match ty {
                         WpTypeOrFuncType::Type(WpType::EmptyBlockType) => smallvec![],
                         WpTypeOrFuncType::Type(inner_ty) => smallvec![inner_ty],
@@ -6315,6 +6370,25 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                             let sig_index = SigIndex::new(sig_index as usize);
                             let sig = self.signatures.get(sig_index).unwrap();
                             sig.returns().iter().cloned().map(type_to_wp_type).collect()
+                        }
+                    },
+                    return_slots: match ty {
+                        WpTypeOrFuncType::Type(WpType::EmptyBlockType) => smallvec![],
+                        WpTypeOrFuncType::Type(_inner_ty) => smallvec![Location::GPR(GPR::RAX)],
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            self.machine.acquire_locations(
+                                a,
+                                sig.returns()
+                                    .iter()
+                                    .cloned()
+                                    .map(type_to_wp_type)
+                                    .zip(iter::repeat(MachineValue::ReturnSlot))
+                                    .collect::<Vec<(WpType, MachineValue)>>()
+                                    .as_slice(),
+                                false,
+                            )
                         }
                     },
                     value_stack_depth: self.value_stack.len(),
@@ -6339,28 +6413,35 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
             Operator::Else => {
                 let mut frame = self.control_stack.last_mut().unwrap();
 
-                if !was_unreachable && frame.returns.len() > 0 {
-                    let loc = *self.value_stack.last().unwrap();
-                    Self::emit_relaxed_binop(
-                        a,
-                        &mut self.machine,
-                        Assembler::emit_mov,
-                        Size::S64,
-                        loc,
-                        Location::GPR(GPR::RAX),
-                    );
+                if !was_unreachable {
+                    //for (&slot, &loc) in frame.return_slots.iter().zip(self.value_stack.iter().rev()) {
+                    for (&slot, &loc) in frame.return_slots.iter().zip(
+                        self.value_stack[self.value_stack.len() - frame.return_slots.len()..]
+                            .iter(),
+                    ) {
+                        Self::emit_relaxed_binop(
+                            a,
+                            &mut self.machine,
+                            Assembler::emit_mov,
+                            Size::S64,
+                            loc,
+                            slot,
+                        );
+                    }
                 }
 
-                let value_stack_depth = self.value_stack.len() - (frame.num_params + frame.returns.len());
-                let released: &[Location] = &self.value_stack[value_stack_depth..];
-                self.machine.release_locations(a, released);
-                self.value_stack.truncate(value_stack_depth);
-                assert_eq!(frame.value_stack_depth, self.value_stack.len());
+                match &frame.if_else {
+                    IfElseState::If((label, value_stack_tail, machine)) => {
+                        let released =
+                            &self.value_stack[frame.value_stack_depth - frame.num_params..];
+                        self.machine.release_locations(a, released);
+                        self.value_stack
+                            .truncate(frame.value_stack_depth - frame.num_params);
+                        self.value_stack.extend(value_stack_tail);
+                        self.machine = machine.clone();
 
-                match frame.if_else {
-                    IfElseState::If(label) => {
                         a.emit_jmp(Condition::None, frame.label);
-                        a.emit_label(label);
+                        a.emit_label(*label);
                         frame.if_else = IfElseState::Else;
                     }
                     _ => {
@@ -6442,6 +6523,25 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                             sig.returns().iter().cloned().map(type_to_wp_type).collect()
                         }
                     },
+                    return_slots: match ty {
+                        WpTypeOrFuncType::Type(WpType::EmptyBlockType) => smallvec![],
+                        WpTypeOrFuncType::Type(_inner_ty) => smallvec![Location::GPR(GPR::RAX)],
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            self.machine.acquire_locations(
+                                a,
+                                sig.returns()
+                                    .iter()
+                                    .cloned()
+                                    .map(type_to_wp_type)
+                                    .zip(iter::repeat(MachineValue::ReturnSlot))
+                                    .collect::<Vec<(WpType, MachineValue)>>()
+                                    .as_slice(),
+                                false,
+                            )
+                        }
+                    },
                     value_stack_depth: self.value_stack.len(),
                     state: self.machine.state.clone(),
                     state_diff_id: Self::get_state_diff(
@@ -6477,6 +6577,25 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                             let sig_index = SigIndex::new(sig_index as usize);
                             let sig = self.signatures.get(sig_index).unwrap();
                             sig.returns().iter().cloned().map(type_to_wp_type).collect()
+                        }
+                    },
+                    return_slots: match ty {
+                        WpTypeOrFuncType::Type(WpType::EmptyBlockType) => smallvec![],
+                        WpTypeOrFuncType::Type(_inner_ty) => smallvec![Location::GPR(GPR::RAX)],
+                        WpTypeOrFuncType::FuncType(sig_index) => {
+                            let sig_index = SigIndex::new(sig_index as usize);
+                            let sig = self.signatures.get(sig_index).unwrap();
+                            self.machine.acquire_locations(
+                                a,
+                                sig.returns()
+                                    .iter()
+                                    .cloned()
+                                    .map(type_to_wp_type)
+                                    .zip(iter::repeat(MachineValue::ReturnSlot))
+                                    .collect::<Vec<(WpType, MachineValue)>>()
+                                    .as_slice(),
+                                false,
+                            )
                         }
                     },
                     value_stack_depth: self.value_stack.len(),
@@ -7331,40 +7450,44 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
             }
             Operator::Return => {
                 let frame = &self.control_stack[0];
-                if frame.returns.len() > 0 {
-                    if frame.returns.len() != 1 {
-                        return Err(CodegenError {
-                            message: format!("Return: incorrect frame.returns"),
-                        });
-                    }
-                    let loc = *self.value_stack.last().unwrap();
+                //for (&slot, &loc) in frame.return_slots.iter().zip(self.value_stack.iter().rev()) {
+                for (&slot, &loc) in frame.return_slots.iter().zip(
+                    self.value_stack[self.value_stack.len() - frame.return_slots.len()..].iter(),
+                ) {
                     Self::emit_relaxed_binop(
                         a,
                         &mut self.machine,
                         Assembler::emit_mov,
                         Size::S64,
                         loc,
-                        Location::GPR(GPR::RAX),
+                        slot,
                     );
                 }
-                let released = &self.value_stack[frame.value_stack_depth..];
-                self.machine.release_locations_keep_state(a, released);
+                self.machine
+                    .release_locations_keep_state(a, &self.value_stack);
                 a.emit_jmp(Condition::None, frame.label);
                 self.unreachable_depth = 1;
             }
             Operator::Br { relative_depth } => {
                 let frame =
                     &self.control_stack[self.control_stack.len() - 1 - (relative_depth as usize)];
-                if !frame.loop_like && frame.returns.len() > 0 {
-                    if frame.returns.len() != 1 {
-                        return Err(CodegenError {
-                            message: format!("Br: incorrect frame.returns"),
-                        });
+                if !frame.loop_like {
+                    //for (&slot, &loc) in frame.return_slots.iter().zip(self.value_stack.iter().rev()) {
+                    for (&slot, &loc) in frame.return_slots.iter().zip(
+                        self.value_stack[self.value_stack.len() - frame.return_slots.len()..]
+                            .iter(),
+                    ) {
+                        Self::emit_relaxed_binop(
+                            a,
+                            &mut self.machine,
+                            Assembler::emit_mov,
+                            Size::S64,
+                            loc,
+                            slot,
+                        );
                     }
-                    let loc = *self.value_stack.last().unwrap();
-                    a.emit_mov(Size::S64, loc, Location::GPR(GPR::RAX));
                 }
-                let released = &self.value_stack[frame.value_stack_depth..];
+                let released = &self.value_stack[frame.value_stack_depth - frame.num_params..];
                 self.machine.release_locations_keep_state(a, released);
                 a.emit_jmp(Condition::None, frame.label);
                 self.unreachable_depth = 1;
@@ -7385,16 +7508,23 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
 
                 let frame =
                     &self.control_stack[self.control_stack.len() - 1 - (relative_depth as usize)];
-                if !frame.loop_like && frame.returns.len() > 0 {
-                    if frame.returns.len() != 1 {
-                        return Err(CodegenError {
-                            message: format!("BrIf: incorrect frame.returns"),
-                        });
+                if !frame.loop_like {
+                    //for (&slot, &loc) in frame.return_slots.iter().zip(self.value_stack.iter().rev()) {
+                    for (&slot, &loc) in frame.return_slots.iter().zip(
+                        self.value_stack[self.value_stack.len() - frame.return_slots.len()..]
+                            .iter(),
+                    ) {
+                        Self::emit_relaxed_binop(
+                            a,
+                            &mut self.machine,
+                            Assembler::emit_mov,
+                            Size::S64,
+                            loc,
+                            slot,
+                        );
                     }
-                    let loc = *self.value_stack.last().unwrap();
-                    a.emit_mov(Size::S64, loc, Location::GPR(GPR::RAX));
                 }
-                let released = &self.value_stack[frame.value_stack_depth..];
+                let released = &self.value_stack[frame.value_stack_depth - frame.num_params..];
                 self.machine.release_locations_keep_state(a, released);
                 a.emit_jmp(Condition::None, frame.label);
 
@@ -7433,19 +7563,23 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                     table.push(label);
                     let frame =
                         &self.control_stack[self.control_stack.len() - 1 - (*target as usize)];
-                    if !frame.loop_like && frame.returns.len() > 0 {
-                        if frame.returns.len() != 1 {
-                            return Err(CodegenError {
-                                message: format!(
-                                    "BrTable: incorrect frame.returns for {:?}",
-                                    target
-                                ),
-                            });
+                    if !frame.loop_like {
+                        //for (&slot, &loc) in frame.return_slots.iter().zip(self.value_stack.iter().rev()) {
+                        for (&slot, &loc) in frame.return_slots.iter().zip(
+                            self.value_stack[self.value_stack.len() - frame.return_slots.len()..]
+                                .iter(),
+                        ) {
+                            Self::emit_relaxed_binop(
+                                a,
+                                &mut self.machine,
+                                Assembler::emit_mov,
+                                Size::S64,
+                                loc,
+                                slot,
+                            );
                         }
-                        let loc = *self.value_stack.last().unwrap();
-                        a.emit_mov(Size::S64, loc, Location::GPR(GPR::RAX));
                     }
-                    let released = &self.value_stack[frame.value_stack_depth..];
+                    let released = &self.value_stack[frame.value_stack_depth - frame.num_params..];
                     self.machine.release_locations_keep_state(a, released);
                     a.emit_jmp(Condition::None, frame.label);
                 }
@@ -7454,16 +7588,23 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                 {
                     let frame = &self.control_stack
                         [self.control_stack.len() - 1 - (default_target as usize)];
-                    if !frame.loop_like && frame.returns.len() > 0 {
-                        if frame.returns.len() != 1 {
-                            return Err(CodegenError {
-                                message: format!("BrTable: incorrect frame.returns"),
-                            });
+                    if !frame.loop_like {
+                        //for (&slot, &loc) in frame.return_slots.iter().zip(self.value_stack.iter().rev()) {
+                        for (&slot, &loc) in frame.return_slots.iter().zip(
+                            self.value_stack[self.value_stack.len() - frame.return_slots.len()..]
+                                .iter(),
+                        ) {
+                            Self::emit_relaxed_binop(
+                                a,
+                                &mut self.machine,
+                                Assembler::emit_mov,
+                                Size::S64,
+                                loc,
+                                slot,
+                            );
                         }
-                        let loc = *self.value_stack.last().unwrap();
-                        a.emit_mov(Size::S64, loc, Location::GPR(GPR::RAX));
                     }
-                    let released = &self.value_stack[frame.value_stack_depth..];
+                    let released = &self.value_stack[frame.value_stack_depth - frame.num_params..];
                     self.machine.release_locations_keep_state(a, released);
                     a.emit_jmp(Condition::None, frame.label);
                 }
@@ -7480,54 +7621,81 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
             Operator::End => {
                 let frame = self.control_stack.pop().unwrap();
 
-                if !was_unreachable && frame.returns.len() > 0 {
-                    let loc = *self.value_stack.last().unwrap();
-                    Self::emit_relaxed_binop(
-                        a,
-                        &mut self.machine,
-                        Assembler::emit_mov,
-                        Size::S64,
-                        loc,
-                        Location::GPR(GPR::RAX),
-                    );
+                if !was_unreachable {
+                    for (&slot, &loc) in frame.return_slots.iter().zip(
+                        self.value_stack[self.value_stack.len() - frame.return_slots.len()..]
+                            .iter(),
+                    ) {
+                        Self::emit_relaxed_binop(
+                            a,
+                            &mut self.machine,
+                            Assembler::emit_mov,
+                            Size::S64,
+                            loc,
+                            slot,
+                        );
+                    }
                 }
 
                 if self.control_stack.len() == 0 {
                     a.emit_label(frame.label);
+                    /*
+                    let mut seq: Vec<Location> = vec![];
+                    seq.extend(
+                        [
+                            Location::GPR(GPR::RAX),
+                            Location::GPR(GPR::RDX),
+                            Location::GPR(GPR::RCX),
+                        ]
+                        .iter()
+                        .cloned(),
+                    );
+                    dbg!(&self.returns);
+                    for i in 0..self.returns.len() {
+                        //dbg!(self.value_stack[i]);
+                        //dbg!(seq[i]);
+                        Self::emit_relaxed_binop(
+                            a,
+                            &mut self.machine,
+                            Assembler::emit_mov,
+                            Size::S64,
+                            self.value_stack[i],
+                            seq[i],
+                        );
+                    }
+                    */
                     self.machine.finalize_locals(a, &self.locals);
                     a.emit_mov(Size::S64, Location::GPR(GPR::RBP), Location::GPR(GPR::RSP));
                     a.emit_pop(Size::S64, Location::GPR(GPR::RBP));
                     a.emit_ret();
                 } else {
-                    let value_stack_depth = self.value_stack.len() - (frame.num_params + frame.returns.len());
-                    let released = &self.value_stack[value_stack_depth..];
+                    let released = &self.value_stack[frame.value_stack_depth - frame.num_params..];
                     self.machine.release_locations(a, released);
-                    self.value_stack.truncate(value_stack_depth);
-                    assert_eq!(frame.value_stack_depth, self.value_stack.len());
+                    self.value_stack
+                        .truncate(frame.value_stack_depth - frame.num_params);
 
                     if !frame.loop_like {
                         a.emit_label(frame.label);
                     }
 
-                    if let IfElseState::If(label) = frame.if_else {
+                    if let IfElseState::If((label, _, _)) = frame.if_else {
                         a.emit_label(label);
                     }
 
-                    if frame.returns.len() > 0 {
-                        if frame.returns.len() != 1 {
-                            return Err(CodegenError {
-                                message: format!("End: incorrect frame.returns"),
-                            });
-                        }
+                    for (&slot, &ret) in frame.return_slots.iter().zip(frame.returns.iter()) {
                         let loc = self.machine.acquire_locations(
                             a,
-                            &[(
-                                frame.returns[0],
-                                MachineValue::WasmStack(self.value_stack.len()),
-                            )],
+                            &[(ret, MachineValue::WasmStack(self.value_stack.len()))],
                             false,
                         )[0];
-                        a.emit_mov(Size::S64, Location::GPR(GPR::RAX), loc);
+                        Self::emit_relaxed_binop(
+                            a,
+                            &mut self.machine,
+                            Assembler::emit_mov,
+                            Size::S64,
+                            slot,
+                            loc,
+                        );
                         self.value_stack.push(loc);
                     }
                 }
