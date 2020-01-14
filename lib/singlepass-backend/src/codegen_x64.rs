@@ -62,7 +62,7 @@ pub const INLINE_BREAKPOINT_SIZE_AARCH64_SINGLEPASS: usize = 12;
 #[cfg(target_arch = "x86_64")]
 lazy_static! {
     /// Performs a System V call to `target` with [stack_top..stack_base] as the argument list, from right to left.
-    static ref CONSTRUCT_STACK_AND_CALL_WASM: unsafe extern "C" fn (stack_top: *const u64, stack_base: *const u64, ctx: *mut vm::Ctx, target: *const vm::Func) -> u64 = {
+    static ref CONSTRUCT_STACK_AND_CALL_WASM: unsafe extern "C" fn (stack_top: *const u64, stack_base: *const u64, ctx: *mut vm::Ctx, target: *const vm::Func, rets_base: *mut u64, rets_count: usize) -> u64 = {
         let mut assembler = Assembler::new().unwrap();
         let offset = assembler.offset();
         dynasm!(
@@ -72,6 +72,9 @@ lazy_static! {
             ; push r13
             ; push r12
             ; push r11
+            ; push r10
+            ; push r9
+            ; push r8
             ; push rbp
             ; mov rbp, rsp
 
@@ -119,8 +122,8 @@ lazy_static! {
             ; and rsp, rax
             ; mov rax, rsp
             ; loop_begin:
-            ; mov r11, [r14]
-            ; mov [rax], r11
+            ; mov r9, [r14]
+            ; mov [rax], r9
             ; sub r14, 8
             ; add rax, 8
             ; cmp r14, r15
@@ -131,9 +134,37 @@ lazy_static! {
             ; mov rax, QWORD 0xfffffffffffffff0u64 as i64
             ; and rsp, rax
             ; call r12
+/*
+            ; cmp r10, r10
+            ; copy_return_loop:
+            ; jz >after_copy
+            ; mov [rax + r10*8], rdx
+            ; mov rdx, [r11 + r10*8]
+            ; dec r10
+            ; jmp <copy_return_loop
+            ; after_copy:
+             */
+
+            ; mov r11, [rbp+8]
+            ; mov r10, [rbp+16]
+            ; cmp r10, 0
+            ; jz >after_return_copy
+            ; mov [r11], rax
+            ; add r11, 8
+            ; dec r10
+            ; jz >after_return_copy
+            ; mov [r11], rdx
+            ; add r11, 8
+            ; dec r10
+            ; jz >after_return_copy
+            ; mov [r11], rcx
+            ; after_return_copy:
 
             ; mov rsp, rbp
             ; pop rbp
+            ; pop r8
+            ; pop r9
+            ; pop r10
             ; pop r11
             ; pop r12
             ; pop r13
@@ -369,15 +400,15 @@ impl RunnableModule for X64ExecutionContext {
             ctx: *mut vm::Ctx,
             func: NonNull<vm::Func>,
             args: *const u64,
+            args_len: usize,
             rets: *mut u64,
+            rets_len: usize,
             trap_info: *mut WasmTrapInfo,
             user_error: *mut Option<Box<dyn Any + Send>>,
-            num_params_plus_one: Option<NonNull<c_void>>,
+            _extra: Option<NonNull<c_void>>,
         ) -> bool {
             let rm: &Box<dyn RunnableModule> = &(&*(*ctx).module).runnable_module;
-
-            let args =
-                slice::from_raw_parts(args, num_params_plus_one.unwrap().as_ptr() as usize - 1);
+            let args = slice::from_raw_parts(args, args_len);
 
             let ret = match protect_unix::call_protected(
                 || {
@@ -389,7 +420,9 @@ impl RunnableModule for X64ExecutionContext {
                             args_reverse.as_ptr().offset(args_reverse.len() as isize),
                             ctx,
                             func.as_ptr(),
-                        )
+                            rets,
+                            rets_len,
+                        );
                     }
                     #[cfg(target_arch = "aarch64")]
                     {
@@ -503,17 +536,11 @@ impl RunnableModule for X64ExecutionContext {
                             &mut cctx as *mut CallCtx as *mut u8,
                         );
                         munmap(stack_ptr, STACK_SIZE);
-                        ret
                     }
                 },
                 rm.get_breakpoints(),
             ) {
-                Ok(x) => {
-                    if !rets.is_null() {
-                        *rets = x;
-                    }
-                    true
-                }
+                Ok(()) => true,
                 Err(err) => {
                     match err {
                         protect_unix::CallProtError::Trap(info) => *trap_info = info,
@@ -7639,31 +7666,31 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
 
                 if self.control_stack.len() == 0 {
                     a.emit_label(frame.label);
-                    /*
-                    let mut seq: Vec<Location> = vec![];
-                    seq.extend(
-                        [
-                            Location::GPR(GPR::RAX),
-                            Location::GPR(GPR::RDX),
-                            Location::GPR(GPR::RCX),
-                        ]
-                        .iter()
-                        .cloned(),
-                    );
-                    dbg!(&self.returns);
-                    for i in 0..self.returns.len() {
-                        //dbg!(self.value_stack[i]);
-                        //dbg!(seq[i]);
-                        Self::emit_relaxed_binop(
-                            a,
-                            &mut self.machine,
-                            Assembler::emit_mov,
-                            Size::S64,
-                            self.value_stack[i],
-                            seq[i],
+                    if !was_unreachable {
+                        let mut seq: Vec<Location> = vec![];
+                        seq.extend(
+                            [
+                                Location::GPR(GPR::RAX),
+                                Location::GPR(GPR::RDX),
+                                Location::GPR(GPR::RCX),
+                            ]
+                            .iter()
+                            .cloned(),
                         );
+                        //dbg!(&self.returns);
+                        for i in 0..self.returns.len() {
+                            //dbg!(self.value_stack[i]);
+                            //dbg!(seq[i]);
+                            Self::emit_relaxed_binop(
+                                a,
+                                &mut self.machine,
+                                Assembler::emit_mov,
+                                Size::S64,
+                                self.value_stack[i],
+                                seq[i],
+                            );
+                        }
                     }
-                    */
                     self.machine.finalize_locals(a, &self.locals);
                     a.emit_mov(Size::S64, Location::GPR(GPR::RBP), Location::GPR(GPR::RSP));
                     a.emit_pop(Size::S64, Location::GPR(GPR::RBP));

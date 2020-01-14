@@ -286,8 +286,11 @@ void module_delete(WasmModule *module) { delete module; }
 }
 
 bool invoke_trampoline(trampoline_t trampoline, void *ctx, void *func,
-                       void *params, void *results, WasmTrapType *trap_out,
+                       void *params, uintptr_t params_len, void *results,
+                       uintptr_t results_len, WasmTrapType *trap_out,
                        box_any_t *user_error, void *invoke_env) noexcept {
+  (void)params_len;
+  (void)results_len;
   try {
     catch_unwind([trampoline, ctx, func, params, results]() {
       trampoline(ctx, func, params, results);
