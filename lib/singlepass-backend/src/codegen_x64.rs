@@ -1859,12 +1859,10 @@ impl X64FunctionCode {
 
         // Restore XMMs.
         if used_xmms.len() > 0 {
-            // FIXME: Possible dynasm bug. This is a workaround.
-            a.emit_mov(Size::S64, Location::GPR(GPR::RSP), Location::GPR(GPR::RDX));
             for (i, r) in used_xmms.iter().enumerate() {
                 a.emit_mov(
                     Size::S64,
-                    Location::Memory(GPR::RDX, (i * 8) as i32),
+                    Location::Memory(GPR::RSP, (i * 8) as i32),
                     Location::XMM(*r),
                 );
             }
