@@ -7477,6 +7477,7 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
             }
             Operator::Return => {
                 let frame = &self.control_stack[0];
+                /*
                 //for (&slot, &loc) in frame.return_slots.iter().zip(self.value_stack.iter().rev()) {
                 for (&slot, &loc) in frame.return_slots.iter().zip(
                     self.value_stack[self.value_stack.len() - frame.return_slots.len()..].iter(),
@@ -7488,6 +7489,27 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                         Size::S64,
                         loc,
                         slot,
+                    );
+                }
+                 */
+                let mut seq: Vec<Location> = vec![];
+                seq.extend(
+                    [
+                        Location::GPR(GPR::RAX),
+                        Location::GPR(GPR::RDX),
+                        Location::GPR(GPR::RCX),
+                    ]
+                    .iter()
+                    .cloned(),
+                );
+                for i in 0..self.returns.len() {
+                    Self::emit_relaxed_binop(
+                        a,
+                        &mut self.machine,
+                        Assembler::emit_mov,
+                        Size::S64,
+                        self.value_stack[self.value_stack.len() - self.returns.len() + i],
+                        seq[i],
                     );
                 }
                 self.machine
@@ -7665,7 +7687,6 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                 }
 
                 if self.control_stack.len() == 0 {
-                    a.emit_label(frame.label);
                     if !was_unreachable {
                         let mut seq: Vec<Location> = vec![];
                         seq.extend(
@@ -7691,6 +7712,7 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                             );
                         }
                     }
+                    a.emit_label(frame.label);
                     self.machine.finalize_locals(a, &self.locals);
                     a.emit_mov(Size::S64, Location::GPR(GPR::RBP), Location::GPR(GPR::RSP));
                     a.emit_pop(Size::S64, Location::GPR(GPR::RBP));
