@@ -1,4 +1,4 @@
-pub use wabt::wat2wasm;
+pub use wabt::wat2wasm_with_features;
 use wasmer_runtime_core::backend::Compiler;
 
 #[cfg(feature = "backend-cranelift")]

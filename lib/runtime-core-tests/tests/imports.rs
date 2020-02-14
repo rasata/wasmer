@@ -1,8 +1,8 @@
 use wasmer_runtime_core::{
-    compile_with, error::RuntimeError, imports, memory::Memory, typed_func::Func,
-    types::MemoryDescriptor, units::Pages, vm, Instance,
+    backend::CompilerConfig, backend::Features, compile_with_config, error::RuntimeError, imports,
+    memory::Memory, typed_func::Func, types::MemoryDescriptor, units::Pages, vm, Instance,
 };
-use wasmer_runtime_core_tests::{get_compiler, wat2wasm};
+use wasmer_runtime_core_tests::{get_compiler, wat2wasm_with_features};
 
 macro_rules! call_and_assert {
     ($instance:ident, $function:ident, $expected_value:expr) => {
@@ -70,6 +70,7 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
     const MODULE: &str = r#"
 (module
   (type $type (func (param i32) (result i32)))
+  (type $multi_value_return_type (func (param i32) (result i32 i32 i32)))
   (import "env" "memory" (memory 1 1))
   (import "env" "callback_fn" (func $callback_fn (type $type)))
   (import "env" "callback_closure" (func $callback_closure (type $type)))
@@ -82,6 +83,7 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
   (import "env" "callback_fn_trap_with_vmctx" (func $callback_fn_trap_with_vmctx (type $type)))
   (import "env" "callback_closure_trap_with_vmctx" (func $callback_closure_trap_with_vmctx (type $type)))
   (import "env" "callback_closure_trap_with_vmctx_and_env" (func $callback_closure_trap_with_vmctx_and_env (type $type)))
+  (import "env" "callback_fn_mvr" (func $callback_fn_mvr (type $multi_value_return_type)))
 
   (func (export "function_fn") (type $type)
     get_local 0
@@ -125,11 +127,29 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
 
   (func (export "function_closure_trap_with_vmctx_and_env") (type $type)
     get_local 0
-    call $callback_closure_trap_with_vmctx_and_env))
+    call $callback_closure_trap_with_vmctx_and_env)
+
+  (func (export "function_mvr") (type $multi_value_return_type)
+    get_local 0
+    call $callback_fn_mvr))
 "#;
 
-    let wasm_binary = wat2wasm(MODULE.as_bytes()).expect("WAST not valid or malformed");
-    let module = compile_with(&wasm_binary, &get_compiler()).unwrap();
+    let mut features = wabt::Features::new();
+    features.enable_multi_value();
+    let wasm_binary =
+        wat2wasm_with_features(MODULE.as_bytes(), features).expect("WAST not valid or malformed");
+    let module = compile_with_config(
+        &wasm_binary,
+        &get_compiler(),
+        CompilerConfig {
+            features: Features {
+                multi_value: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let memory_descriptor = MemoryDescriptor::new(Pages(1), Some(Pages(1)), false).unwrap();
     let memory = Memory::new(memory_descriptor).unwrap();
 
@@ -199,6 +219,9 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
 
                 Err(format!("! {}", shift_ + n + 1))
             }),
+
+            // Multiple return value function.
+            "callback_fn_mvr" => Func::new(callback_fn_mvr),
         },
     };
     let instance = module.instantiate(&import_object).unwrap();
@@ -226,6 +249,10 @@ fn callback_fn_trap_with_vmctx(vmctx: &mut vm::Ctx, n: i32) -> Result<i32, Strin
     let shift_: i32 = memory.view()[0].get();
 
     Err(format!("baz {}", shift_ + n + 1))
+}
+
+fn callback_fn_mvr(vmctx: &mut vm::Ctx, n: i32) -> Result<(i32, i32, i32), ()> {
+    Ok((n, n + 1, n + 2))
 }
 
 macro_rules! test {
@@ -292,3 +319,57 @@ test!(
         data: Box::new(format!("! {}", 2 + shift + SHIFT))
     })
 );
+
+#[test]
+// Known broken.
+#[ignore]
+fn test_fn_mvr() {
+    imported_functions_forms(&|instance| {
+        let function_mvr: Func<i32, (i32, i32, i32)> = instance.func("function_mvr").unwrap();
+
+        let result = function_mvr.call(1);
+
+        match (result, Ok((1, 2, 3))) {
+            (Ok(value), expected_value) => assert_eq!(
+                Ok(value),
+                expected_value,
+                concat!("Expected right when calling `function_mvr`.")
+            ),
+            (
+                Err(RuntimeError::Error { data }),
+                Err(RuntimeError::Error {
+                    data: expected_data,
+                }),
+            ) => {
+                if let (Some(data), Some(expected_data)) = (
+                    data.downcast_ref::<&str>(),
+                    expected_data.downcast_ref::<&str>(),
+                ) {
+                    assert_eq!(
+                        data, expected_data,
+                        concat!("Expected right when calling `function_mvr`.")
+                    )
+                } else if let (Some(data), Some(expected_data)) = (
+                    data.downcast_ref::<String>(),
+                    expected_data.downcast_ref::<String>(),
+                ) {
+                    assert_eq!(
+                        data, expected_data,
+                        concat!("Expected right when calling `function_mvr`.")
+                    )
+                } else {
+                    assert!(false, "Unexpected error, cannot compare it.")
+                }
+            }
+            (result, expected_value) => assert!(
+                false,
+                format!(
+                    "Unexpected assertion for `{}`: left = `{:?}`, right = `{:?}`.",
+                    stringify!($function),
+                    result,
+                    expected_value
+                )
+            ),
+        }
+    });
+}
