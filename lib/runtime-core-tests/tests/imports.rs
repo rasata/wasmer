@@ -320,12 +320,7 @@ fn test_fn_mvr() {
                 expected_value,
                 concat!("Expected right when calling `function_mvr`.")
             ),
-            (
-                Err(RuntimeError::Error { data }),
-                Err(RuntimeError::Error {
-                    data: expected_data,
-                }),
-            ) => {
+            (Err(RuntimeError(data)), Err(RuntimeError(expected_data))) => {
                 if let (Some(data), Some(expected_data)) = (
                     data.downcast_ref::<&str>(),
                     expected_data.downcast_ref::<&str>(),
@@ -349,8 +344,7 @@ fn test_fn_mvr() {
             (result, expected_value) => assert!(
                 false,
                 format!(
-                    "Unexpected assertion for `{}`: left = `{:?}`, right = `{:?}`.",
-                    stringify!($function),
+                    "Unexpected assertion for `function_mvr`: left = `{:?}`, right = `{:?}`.",
                     result,
                     expected_value
                 )
