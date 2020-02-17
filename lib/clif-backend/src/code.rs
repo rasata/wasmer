@@ -18,7 +18,7 @@ use std::mem;
 use std::sync::{Arc, RwLock};
 use wasmer_runtime_core::error::CompileError;
 use wasmer_runtime_core::{
-    backend::{Backend, CacheGen, Token},
+    backend::{CacheGen, Token},
     cache::{Artifact, Error as CacheError},
     codegen::*,
     memory::MemoryType,
@@ -32,6 +32,8 @@ use wasmer_runtime_core::{
     vm,
 };
 use wasmparser::Type as WpType;
+
+static BACKEND_ID: &str = "cranelift";
 
 pub struct CraneliftModuleCodeGenerator {
     isa: Box<dyn isa::TargetIsa>,
@@ -59,8 +61,8 @@ impl ModuleCodeGenerator<CraneliftFunctionCodeGenerator, Caller, CodegenError>
         unimplemented!("cross compilation is not available for clif backend")
     }
 
-    fn backend_id() -> Backend {
-        Backend::Cranelift
+    fn backend_id() -> &'static str {
+        BACKEND_ID
     }
 
     fn check_precondition(&mut self, _module_info: &ModuleInfo) -> Result<(), CodegenError> {
@@ -457,7 +459,7 @@ impl FuncEnvironment for FunctionEnvironment {
                 let local_memory_bound = func.create_global_value(ir::GlobalValueData::Load {
                     base: local_memory_ptr,
                     offset: (vm::LocalMemory::offset_bound() as i32).into(),
-                    global_type: ptr_type,
+                    global_type: ir::types::I32,
                     readonly: false,
                 });
 
@@ -565,7 +567,7 @@ impl FuncEnvironment for FunctionEnvironment {
         let table_count = func.create_global_value(ir::GlobalValueData::Load {
             base: table_struct_ptr,
             offset: (vm::LocalTable::offset_count() as i32).into(),
-            global_type: ptr_type,
+            global_type: ir::types::I32,
             // The table length can change, so it can't be readonly.
             readonly: false,
         });
@@ -687,7 +689,8 @@ impl FuncEnvironment for FunctionEnvironment {
                 colocated: false,
             });
 
-            pos.ins().symbol_value(ir::types::I64, sig_index_global)
+            let val = pos.ins().symbol_value(ir::types::I64, sig_index_global);
+            pos.ins().ireduce(ir::types::I32, val)
 
             // let dynamic_sigindices_array_ptr = pos.ins().load(
             //     ptr_type,

@@ -32,7 +32,7 @@ use std::{
 };
 
 use wasmer_runtime_core::{
-    backend::{Backend, CacheGen, CompilerConfig, Token},
+    backend::{CacheGen, CompilerConfig, Token},
     cache::{Artifact, Error as CacheError},
     codegen::*,
     memory::MemoryType,
@@ -44,6 +44,8 @@ use wasmer_runtime_core::{
     },
 };
 use wasmparser::{BinaryReaderError, MemoryImmediate, Operator, Type as WpType};
+
+static BACKEND_ID: &str = "llvm";
 
 fn func_sig_to_llvm<'ctx>(
     context: &'ctx Context,
@@ -8775,8 +8777,8 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
         }
     }
 
-    fn backend_id() -> Backend {
-        Backend::LLVM
+    fn backend_id() -> &'static str {
+        BACKEND_ID
     }
 
     fn check_precondition(&mut self, _module_info: &ModuleInfo) -> Result<(), CodegenError> {

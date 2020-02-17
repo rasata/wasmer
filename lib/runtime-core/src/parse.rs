@@ -3,7 +3,7 @@
 
 use crate::codegen::*;
 use crate::{
-    backend::{Backend, CompilerConfig, RunnableModule},
+    backend::{CompilerConfig, RunnableModule},
     error::CompileError,
     module::{
         DataInitializer, ExportIndex, ImportName, ModuleInfo, StringTable, StringTableBuilder,
@@ -57,7 +57,6 @@ pub fn read_module<
     E: Debug,
 >(
     wasm: &[u8],
-    backend: Backend,
     mcg: &mut MCG,
     middlewares: &mut MiddlewareChain,
     compiler_config: &CompilerConfig,
@@ -83,7 +82,7 @@ pub fn read_module<
 
         func_assoc: Map::new(),
         signatures: Map::new(),
-        backend: backend,
+        backend: MCG::backend_id().to_string(),
 
         namespace_table: StringTable::new(),
         name_table: StringTable::new(),
@@ -146,7 +145,7 @@ pub fn read_module<
                     ImportSectionEntryType::Memory(memory_ty) => {
                         let mem_desc = MemoryDescriptor::new(
                             Pages(memory_ty.limits.initial),
-                            memory_ty.limits.maximum.map(|max| Pages(max)),
+                            memory_ty.limits.maximum.map(Pages),
                             memory_ty.shared,
                         )
                         .map_err(|x| LoadError::Codegen(format!("{:?}", x)))?;
@@ -184,7 +183,7 @@ pub fn read_module<
             ParserState::MemorySectionEntry(memory_ty) => {
                 let mem_desc = MemoryDescriptor::new(
                     Pages(memory_ty.limits.initial),
-                    memory_ty.limits.maximum.map(|max| Pages(max)),
+                    memory_ty.limits.maximum.map(Pages),
                     memory_ty.shared,
                 )
                 .map_err(|x| LoadError::Codegen(format!("{:?}", x)))?;
@@ -272,11 +271,11 @@ pub fn read_module<
                                         Event::Internal(InternalEvent::FunctionBegin(id as u32)),
                                         &info.read().unwrap(),
                                     )
-                                    .map_err(|x| LoadError::Codegen(x))?;
+                                    .map_err(LoadError::Codegen)?;
                             }
                             middlewares
                                 .run(Some(fcg), Event::Wasm(op), &info.read().unwrap())
-                                .map_err(|x| LoadError::Codegen(x))?;
+                                .map_err(LoadError::Codegen)?;
                         }
                         ParserState::EndFunctionBody => break,
                         _ => unreachable!(),
@@ -288,7 +287,7 @@ pub fn read_module<
                         Event::Internal(InternalEvent::FunctionEnd),
                         &info.read().unwrap(),
                     )
-                    .map_err(|x| LoadError::Codegen(x))?;
+                    .map_err(LoadError::Codegen)?;
                 fcg.finalize()
                     .map_err(|x| LoadError::Codegen(format!("{:?}", x)))?;
                 func_count = func_count.wrapping_add(1);

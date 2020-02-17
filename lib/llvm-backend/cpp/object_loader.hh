@@ -59,6 +59,7 @@ enum WasmTrapType {
   MemoryOutOfBounds = 2,
   CallIndirectOOB = 3,
   IllegalArithmetic = 4,
+  MisalignedAtomicAccess = 5,
   Unknown,
 };
 
@@ -285,10 +286,10 @@ void module_delete(WasmModule *module) { delete module; }
   unsafe_unwind(new BreakpointException(callback));
 }
 
-bool invoke_trampoline(trampoline_t trampoline, void *ctx, void *func,
-                       void *params, uintptr_t params_len, void *results,
-                       uintptr_t results_len, WasmTrapType *trap_out,
-                       box_any_t *user_error, void *invoke_env) noexcept {
+bool cxx_invoke_trampoline(trampoline_t trampoline, void *ctx, void *func,
+                           void *params, uintptr_t params_len, void *results,
+                           uintptr_t results_len, WasmTrapType *trap_out,
+                           box_any_t *user_error, void *invoke_env) noexcept {
   (void)params_len;
   (void)results_len;
   try {

@@ -11,51 +11,11 @@ use std::{
     any::Any,
     convert::Infallible,
     ffi::c_void,
-    fmt,
     marker::PhantomData,
     mem, panic,
     ptr::{self, NonNull},
     sync::Arc,
 };
-
-/// Wasm trap info.
-#[repr(C)]
-pub enum WasmTrapInfo {
-    /// Unreachable trap.
-    Unreachable = 0,
-    /// Call indirect incorrect signature trap.
-    IncorrectCallIndirectSignature = 1,
-    /// Memory out of bounds trap.
-    MemoryOutOfBounds = 2,
-    /// Call indirect out of bounds trap.
-    CallIndirectOOB = 3,
-    /// Illegal arithmetic trap.
-    IllegalArithmetic = 4,
-    /// Misaligned atomic access trap.
-    MisalignedAtomicAccess = 5,
-    /// Unknown trap.
-    Unknown,
-}
-
-impl fmt::Display for WasmTrapInfo {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                WasmTrapInfo::Unreachable => "unreachable",
-                WasmTrapInfo::IncorrectCallIndirectSignature => {
-                    "incorrect `call_indirect` signature"
-                }
-                WasmTrapInfo::MemoryOutOfBounds => "memory out-of-bounds access",
-                WasmTrapInfo::CallIndirectOOB => "`call_indirect` out-of-bounds",
-                WasmTrapInfo::IllegalArithmetic => "illegal arithmetic operation",
-                WasmTrapInfo::MisalignedAtomicAccess => "misaligned atomic access",
-                WasmTrapInfo::Unknown => "unknown",
-            }
-        )
-    }
-}
 
 /// This is just an empty trait to constrict that types that
 /// can be put into the third/fourth (depending if you include lifetimes)
@@ -79,8 +39,7 @@ pub type Invoke = unsafe extern "C" fn(
     args_len: usize,
     rets: *mut u64,
     rets_len: usize,
-    trap_info: *mut WasmTrapInfo,
-    user_error: *mut Option<Box<dyn Any + Send>>,
+    error_out: *mut Option<Box<dyn Any + Send>>,
     extra: Option<NonNull<c_void>>,
 ) -> bool;
 
@@ -142,7 +101,7 @@ pub trait WasmTypeList {
 
     /// This method is used to distribute the values onto a function,
     /// e.g. `(1, 2).call(func, …)`. This form is unlikely to be used
-    /// directly in the code, see the `Func:call` implementation.
+    /// directly in the code, see the `Func::call` implementation.
     unsafe fn call<Rets>(
         self,
         f: NonNull<vm::Func>,
@@ -193,7 +152,7 @@ where
     Args: WasmTypeList,
     Rets: WasmTypeList,
 {
-    /// Conver to function pointer.
+    /// Convert to function pointer.
     fn to_raw(self) -> (NonNull<vm::Func>, Option<NonNull<vm::FuncEnv>>);
 }
 
@@ -260,11 +219,6 @@ where
             _phantom: PhantomData,
         }
     }
-
-    /// Get the underlying func pointer.
-    pub fn get_vm_func(&self) -> NonNull<vm::Func> {
-        self.func
-    }
 }
 
 impl<'a, Args, Rets> Func<'a, Args, Rets, Host>
@@ -304,6 +258,11 @@ where
     /// Returns the types of the function outputs.
     pub fn returns(&self) -> &'static [Type] {
         Rets::types()
+    }
+
+    /// Get the underlying func pointer.
+    pub fn get_vm_func(&self) -> NonNull<vm::Func> {
+        self.func
     }
 }
 
@@ -403,8 +362,7 @@ macro_rules! impl_traits {
                 let ( $( $x ),* ) = self;
                 let args = [ $( $x.to_native().to_binary()),* ];
                 let mut rets = Rets::empty_ret_array();
-                let mut trap = WasmTrapInfo::Unknown;
-                let mut user_error = None;
+                let mut error_out = None;
 
                 if (wasm.invoke)(
                     wasm.trampoline,
@@ -414,17 +372,14 @@ macro_rules! impl_traits {
                     args.len(),
                     rets.as_mut().as_mut_ptr(),
                     rets.as_mut().len(),
-                    &mut trap,
-                    &mut user_error,
+                    &mut error_out,
                     wasm.invoke_env
                 ) {
                     Ok(Rets::from_ret_array(rets))
                 } else {
-                    if let Some(data) = user_error {
-                        Err(RuntimeError::Error { data })
-                    } else {
-                        Err(RuntimeError::Trap { msg: trap.to_string().into() })
-                    }
+                    Err(error_out.map(RuntimeError).unwrap_or_else(|| {
+                        RuntimeError(Box::new("invoke(): Unknown error".to_string()))
+                    }))
                 }
             }
         }
@@ -434,7 +389,7 @@ macro_rules! impl_traits {
             $( $x: WasmExternType, )*
             Rets: WasmTypeList,
             Trap: TrapEarly<Rets>,
-            FN: Fn(&mut vm::Ctx $( , $x )*) -> Trap + 'static,
+            FN: Fn(&mut vm::Ctx $( , $x )*) -> Trap + 'static + Send,
         {
             #[allow(non_snake_case)]
             fn to_raw(self) -> (NonNull<vm::Func>, Option<NonNull<vm::FuncEnv>>) {
@@ -549,7 +504,7 @@ macro_rules! impl_traits {
             $( $x: WasmExternType, )*
             Rets: WasmTypeList,
             Trap: TrapEarly<Rets>,
-            FN: Fn($( $x, )*) -> Trap + 'static,
+            FN: Fn($( $x, )*) -> Trap + 'static + Send,
         {
             #[allow(non_snake_case)]
             fn to_raw(self) -> (NonNull<vm::Func>, Option<NonNull<vm::FuncEnv>>) {
@@ -662,7 +617,7 @@ macro_rules! impl_traits {
             Rets: WasmTypeList,
         {
             /// Call the typed func and return results.
-            #[allow(non_snake_case)]
+            #[allow(non_snake_case, clippy::too_many_arguments)]
             pub fn call(&self, $( $x: $x, )* ) -> Result<Rets, RuntimeError> {
                 #[allow(unused_parens)]
                 unsafe {
@@ -735,6 +690,12 @@ where
             signature,
         }
     }
+}
+
+/// Function that always fails. It can be used as a placeholder when a
+/// host function is missing for instance.
+pub(crate) fn always_trap() -> Result<(), &'static str> {
+    Err("not implemented")
 }
 
 #[cfg(test)]

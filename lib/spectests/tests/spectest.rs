@@ -618,9 +618,47 @@ mod tests {
                     } => {
                         let maybe_call_result =
                             with_instance(instance.clone(), &named_modules, &module, |instance| {
+                                #[cfg(unix)]
+                                use wasmer_runtime::{
+                                    pop_code_version, push_code_version, CodeVersion,
+                                };
+
+                                // Manually push code version before calling WebAssembly function, as a hack.
+                                //
+                                // This should eventually be fixed by doing push/pop code version in the function invocation
+                                // logic itself.
+
+                                #[cfg(unix)]
+                                let cv_pushed = if let Some(msm) =
+                                    instance.module.runnable_module.get_module_state_map()
+                                {
+                                    push_code_version(CodeVersion {
+                                        baseline: true,
+                                        msm: msm,
+                                        base: instance
+                                            .module
+                                            .runnable_module
+                                            .get_code()
+                                            .unwrap()
+                                            .as_ptr()
+                                            as usize,
+                                        backend: backend.into(),
+                                        runnable_module: instance.module.runnable_module.clone(),
+                                    });
+                                    true
+                                } else {
+                                    false
+                                };
                                 let params: Vec<wasmer_runtime::types::Value> =
                                     args.iter().cloned().map(convert_value).collect();
-                                instance.call(&field, &params[..])
+                                let ret = instance.call(&field, &params[..]);
+                                #[cfg(unix)]
+                                {
+                                    if cv_pushed {
+                                        pop_code_version().unwrap();
+                                    }
+                                }
+                                ret
                             });
                         if maybe_call_result.is_none() {
                             test_report.add_failure(
@@ -638,47 +676,41 @@ mod tests {
                             let call_result = maybe_call_result.unwrap();
                             use wasmer_runtime::error::{CallError, RuntimeError};
                             match call_result {
-                                Err(e) => {
-                                    match e {
-                                        CallError::Resolve(_) => {
+                                Err(e) => match e {
+                                    CallError::Resolve(_) => {
+                                        test_report.add_failure(
+                                            SpecFailure {
+                                                file: filename.to_string(),
+                                                line,
+                                                kind: format!("{}", "AssertTrap"),
+                                                message: format!("expected trap, got {:?}", e),
+                                            },
+                                            &test_key,
+                                            excludes,
+                                            line,
+                                        );
+                                    }
+                                    CallError::Runtime(RuntimeError(e)) => {
+                                        use wasmer_runtime::ExceptionCode;
+                                        if let Some(_) = e.downcast_ref::<ExceptionCode>() {
+                                            test_report.count_passed();
+                                        } else {
                                             test_report.add_failure(
                                                 SpecFailure {
                                                     file: filename.to_string(),
                                                     line,
                                                     kind: format!("{}", "AssertTrap"),
-                                                    message: format!("expected trap, got {:?}", e),
+                                                    message: format!(
+                                                        "expected trap, got RuntimeError"
+                                                    ),
                                                 },
                                                 &test_key,
                                                 excludes,
                                                 line,
                                             );
                                         }
-                                        CallError::Runtime(r) => {
-                                            match r {
-                                                RuntimeError::Trap { .. } => {
-                                                    // TODO assert message?
-                                                    test_report.count_passed()
-                                                }
-                                                RuntimeError::Error { .. } => {
-                                                    test_report.add_failure(
-                                                        SpecFailure {
-                                                            file: filename.to_string(),
-                                                            line,
-                                                            kind: format!("{}", "AssertTrap"),
-                                                            message: format!(
-                                                            "expected trap, got Runtime:Error {:?}",
-                                                            r
-                                                        ),
-                                                        },
-                                                        &test_key,
-                                                        excludes,
-                                                        line,
-                                                    );
-                                                }
-                                            }
-                                        }
                                     }
-                                }
+                                },
                                 Ok(values) => {
                                     test_report.add_failure(
                                         SpecFailure {
